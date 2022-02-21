@@ -268,6 +268,7 @@ broadcast_notangent(a) = broadcast(_ -> NoTangent(), a)
 @non_differentiable SiteType(::Any)
 @non_differentiable ITensors._sitetypes(::Any)
 @non_differentiable addtags(::TagSet, ::Any)
+@non_differentiable optimal_contraction_sequence(::Any)
 
 #
 # MPO/MPS
