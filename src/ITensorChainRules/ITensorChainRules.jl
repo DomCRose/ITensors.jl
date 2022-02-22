@@ -136,7 +136,7 @@ end
 #end
 
 # Special case for contracting a pair of ITensors
-function ChainRulesCore.rrule(::typeof(*), x1::ITensor, x2::ITensor)
+function ChainRulesCore.rrule(::typeof(contract), x1::ITensor, x2::ITensor)
   y = x1 * x2
   function contract_pullback(ȳ)
     x̄1 = ȳ * dag(x2)
@@ -146,14 +146,8 @@ function ChainRulesCore.rrule(::typeof(*), x1::ITensor, x2::ITensor)
   return y, contract_pullback
 end
 
-function ChainRulesCore.rrule(::typeof(contract), x1::ITensor, x2::ITensor)
-  y = x1 * x2
-  function contract_pullback(ȳ)
-    x̄1 = ȳ * dag(x2)
-    x̄2 = dag(x1) * ȳ
-    return (NoTangent(), x̄1, x̄2)
-  end
-  return y, contract_pullback
+function ChainRulesCore.rrule(::typeof(*), x1::ITensor, x2::ITensor)
+  return ChainRulesCore.rrule(typeof(contract), x1, x2)
 end
 
 function ChainRulesCore.rrule(::typeof(*), x1::Number, x2::ITensor)
