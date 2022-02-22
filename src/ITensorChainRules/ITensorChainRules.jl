@@ -215,7 +215,7 @@ function ChainRulesCore.rrule(::typeof(itensor), x::Array, a...)
   return y, itensor_pullback
 end
 
-function ChainRulesCore.rrule(::Type{ITensor}, x::Array{<:Number}, a...)
+function ChainRulesCore.rrule(::typeof(ITensor), x::Array{<:Number}, a...)
   y = ITensor(x, a...)
   function ITensor_pullback(ȳ)
     # TODO: define `Array(::ITensor)` directly
@@ -227,7 +227,7 @@ function ChainRulesCore.rrule(::Type{ITensor}, x::Array{<:Number}, a...)
   return y, ITensor_pullback
 end
 
-function ChainRulesCore.rrule(::Type{ITensor}, x::Number)
+function ChainRulesCore.rrule(::typeof(ITensor), x::Number)
   y = ITensor(x)
   function ITensor_pullback(ȳ)
     x̄ = ȳ[]
