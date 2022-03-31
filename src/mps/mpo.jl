@@ -113,24 +113,65 @@ function MPO(A::ITensor, sites::Vector{<:Index}; kwargs...)
   return MPO(A, IndexSet.(prime.(sites), dag.(sites)); kwargs...)
 end
 
+function outer_mps_mps_deprecation_warning()
+  return "Calling `outer(ψ::MPS, ϕ::MPS)` for MPS `ψ` and `ϕ` with shared indices is deprecated. Currently, we automatically prime `ψ` to make sure the site indices don't clash, but that will no longer be the case in ITensors v0.4. To upgrade your code, call `outer(ψ', ϕ)`. Although the new interface seems less convenient, it will allow `outer` to accept more general outer products going forward, such as outer products where some indices are shared (a batched outer product) or outer products of MPS between site indices that aren't just related by a single prime level."
+end
+
+function deprecate_make_inds_unmatch(::typeof(outer), ψ::MPS, ϕ::MPS; kw...)
+  if hassameinds(siteinds, ψ, ϕ)
+    warn_once(outer_mps_mps_deprecation_warning(), :outer_mps_mps)
+    ψ = ψ'
+  end
+  return ψ, ϕ
+end
+
 """
     outer(x::MPS, y::MPS; <keyword argument>) -> MPO
 
 Compute the outer product of `MPS` `x` and `MPS` `y`,
-returning an `MPO` approximation.
-
-Note that `y` will be conjugated, and the site indices
-of `x` will be primed.
+returning an `MPO` approximation. Note that `y` will be conjugated.
 
 In Dirac notation, this is the operation `|x⟩⟨y|`.
 
-The keyword arguments determine the truncation, and accept
-the same arguments as `contract(::MPO, ::MPO; kw...)`.
+If you want an outer product of an MPS with itself, you should
+call `outer(x', x; kwargs...)` so that the resulting MPO
+has site indices with indices coming in pairs of prime levels
+of 1 and 0. If not, the site indices won't be unique which would
+not be an outer product.
 
-See also [`product`](@ref), [`contract`](@ref).
+For example:
+```julia
+s = siteinds("S=1/2", 5)
+x = randomMPS(s)
+y = randomMPS(s)
+outer(x, y) # Incorrect! Site indices must be unique.
+outer(x', y) # Results in an MPO with pairs of primed and unprimed indices.
+```
+This allows for more general outer products, such as more general
+MPO outputs which don't have pairs of primed and unprimed indices,
+or outer products where the input MPS are vectorizations of MPOs.
+
+For example:
+```julia
+s = siteinds("S=1/2", 5)
+X = MPO(s, "Id")
+Y = MPO(s, "Id")
+x = convert(MPS, X)
+y = convert(MPS, Y)
+outer(x, y) # Incorrect! Site indices must be unique.
+outer(x', y) # Incorrect! Site indices must be unique.
+outer(addtags(x, "Out"), addtags(y, "In")) # This performs a proper outer product.
+```
+
+The keyword arguments determine the truncation, and accept
+the same arguments as `contract(::MPO, ::MPO; kwargs...)`.
+
+See also [`apply`](@ref), [`contract`](@ref).
 """
 function outer(ψ::MPS, ϕ::MPS; kw...)
-  ψmat = convert(MPO, ψ')
+  ψ, ϕ = deprecate_make_inds_unmatch(outer, ψ, ϕ; kw...)
+
+  ψmat = convert(MPO, ψ)
   ϕmat = convert(MPO, dag(ϕ))
   return contract(ψmat, ϕmat; kw...)
 end
@@ -150,7 +191,7 @@ the same as those accepted by `contract(::MPO, ::MPO; kw...)`.
 See also [`outer`](@ref), [`contract`](@ref).
 """
 function projector(ψ::MPS; normalize::Bool=true, kw...)
-  ψψᴴ = outer(ψ, ψ; kw...)
+  ψψᴴ = outer(ψ', ψ; kw...)
   if normalize
     normalize!(ψψᴴ[orthocenter(ψψᴴ)])
   end
@@ -208,6 +249,65 @@ function hassameinds(::typeof(siteinds), ψ::MPS, Hϕ::Tuple{MPO,MPS})
   return true
 end
 
+function inner_mps_mpo_mps_deprecation_warning()
+  return """
+ Calling `inner(x::MPS, A::MPO, y::MPS)` where the site indices of the `MPS` `x` and the `MPS` resulting from contracting `MPO` `A` with `MPS` `y` don't match is deprecated as of ITensors v0.3 and will result in an error in ITensors v0.4. The most common cause of this is something like the following:
+ ```julia
+ s = siteinds("S=1/2")
+ psi = randomMPS(s)
+ H = MPO(s, "Id")
+ inner(psi, H, psi)
+ ```
+ `psi` has the Index structure `-s-(psi)` and `H` has the Index structure `-s'-(H)-s-`, so the Index structure of would be `(dag(psi)-s- -s'-(H)-s-(psi)` unless the prime levels were fixed. Previously we tried fixing the prime level in situations like this, but we will no longer be doing that going forward.
+
+ There are a few ways to fix this. You can simply change:
+ ```julia
+ inner(psi, H, psi)
+ ```
+ to:
+ ```julia
+ inner(psi', H, psi)
+ ```
+ in which case the Index structure will be `(dag(psi)-s'-(H)-s-(psi)`.
+
+ Alternatively, you can use the `Apply` function:
+ ```julia
+ inner(psi, Apply(H, psi))
+ ```
+ In this case, `Apply(H, psi)` represents the "lazy" evaluation of `apply(H, psi)`. The function `apply(H, psi)` performs the contraction of `H` with `psi` and then unprimes the results, so this versions ensures that the prime levels of the inner product will match.
+
+ Although the new behavior seems less convenient, it makes it easier to generalize `inner(::MPS, ::MPO, ::MPS)` to other types of inputs, like `MPS` and `MPO` with different tag and prime conventions, multiple sites per tensor, `ITensor` inputs, etc.
+ """
+end
+
+function deprecate_make_inds_match!(
+  ::typeof(dot), ydag::MPS, A::MPO, x::MPS; make_inds_match::Bool=true
+)
+  N = length(x)
+  if !hassameinds(siteinds, ydag, (A, x))
+    sAx = siteinds((A, x))
+    if any(s -> length(s) > 1, sAx)
+      n = findfirst(n -> !hassameinds(siteinds(ydag, n), siteinds((A, x), n)), 1:N)
+      error(
+        """Calling `dot(ϕ::MPS, H::MPO, ψ::MPS)` with multiple site indices per MPO/MPS tensor but the site indices don't match. Even with `make_inds_match = true`, the case of multiple site indices per MPO/MPS is not handled automatically. The sites with unmatched site indices are:
+
+            inds(ϕ[$n]) = $(inds(ydag[n]))
+
+            inds(H[$n]) = $(inds(A[n]))
+
+            inds(ψ[$n]) = $(inds(x[n]))
+
+        Make sure the site indices of your MPO/MPS match. You may need to prime one of the MPS, such as `dot(ϕ', H, ψ)`.""",
+      )
+    end
+    if !hassameinds(siteinds, ydag, (A, x)) && make_inds_match
+      warn_once(inner_mps_mpo_mps_deprecation_warning(), :inner_mps_mpo_mps)
+      replace_siteinds!(ydag, sAx)
+    end
+  end
+  return ydag, A, x
+end
+
 """
     dot(y::MPS, A::MPO, x::MPS; make_inds_match::Bool = true)
     inner(y::MPS, A::MPO, x::MPS; make_inds_match::Bool = true)
@@ -227,26 +327,7 @@ function dot(y::MPS, A::MPO, x::MPS; make_inds_match::Bool=true, kwargs...)::Num
   check_hascommoninds(siteinds, A, x)
   ydag = dag(y)
   sim!(linkinds, ydag)
-  if !hassameinds(siteinds, y, (A, x))
-    sAx = siteinds((A, x))
-    if any(s -> length(s) > 1, sAx)
-      n = findfirst(n -> !hassameinds(siteinds(y, n), siteinds((A, x), n)), 1:N)
-      error(
-        """Calling `dot(ϕ::MPS, H::MPO, ψ::MPS)` with multiple site indices per MPO/MPS tensor but the site indices don't match. Even with `make_inds_match = true`, the case of multiple site indices per MPO/MPS is not handled automatically. The sites with unmatched site indices are:
-
-            inds(ϕ[$n]) = $(inds(y[n]))
-
-            inds(H[$n]) = $(inds(A[n]))
-
-            inds(ψ[$n]) = $(inds(x[n]))
-
-        Make sure the site indices of your MPO/MPS match. You may need to prime one of the MPS, such as `dot(ϕ', H, ψ)`.""",
-      )
-    end
-    if make_inds_match
-      replace_siteinds!(ydag, sAx)
-    end
-  end
+  ydag, A, x = deprecate_make_inds_match!(dot, ydag, A, x; make_inds_match)
   check_hascommoninds(siteinds, A, y)
   O = ydag[1] * A[1] * x[1]
   for j in 2:N
@@ -256,6 +337,10 @@ function dot(y::MPS, A::MPO, x::MPS; make_inds_match::Bool=true, kwargs...)::Num
 end
 
 inner(y::MPS, A::MPO, x::MPS; kwargs...) = dot(y, A, x; kwargs...)
+
+function inner(y::MPS, Ax::Apply{Tuple{MPO,MPS}})
+  return inner(y', Ax.args[1], Ax.args[2])
+end
 
 """
     dot(B::MPO, y::MPS, A::MPO, x::MPS; make_inds_match::Bool = true)
@@ -370,12 +455,29 @@ function error_contract(y::MPS, A::MPO, x::MPS; kwargs...)
     )
   end
   iyy = dot(y, y; kwargs...)
-  iyax = dot(y, A, x; kwargs...)
+  iyax = dot(y', A, x; kwargs...)
   iaxax = dot(A, x, A, x; kwargs...)
   return sqrt(abs(1.0 + (iyy - 2 * real(iyax)) / iaxax))
 end
 
 error_contract(y::MPS, x::MPS, A::MPO) = error_contract(y, A, x)
+
+"""
+    apply(A::MPO, x::MPS; kwargs...)
+
+Contract the `MPO` `A` with the `MPS` `x` and then map the prime level of the resulting
+MPS back to 0.
+
+Equivalent to `replaceprime(contract(A, x; kwargs...), 2 => 1)`.
+
+See also [`contract`](@ref) for details about the arguments available.
+"""
+function apply(A::MPO, ψ::MPS; kwargs...)
+  Aψ = contract(A, ψ; kwargs...)
+  return replaceprime(Aψ, 1 => 0)
+end
+
+(A::MPO)(ψ::MPS; kwargs...) = apply(A, ψ; kwargs...)
 
 function contract(A::MPO, ψ::MPS; kwargs...)
   method = get(kwargs, :method, "densitymatrix")
@@ -411,6 +513,18 @@ contract_mpo_mps_doc = """
 Contract the `MPO` `A` with the `MPS` `ψ`, returning an `MPS` with the unique
 site indices of the `MPO`.
 
+For example, for an MPO with site indices with prime levels of 1 and 0, such as
+`-s'-A-s-`, and an MPS with site indices with prime levels of 0, such as
+`-s-x`, the result is an MPS `y` with site indices with prime levels of 1,
+`-s'-y = -s'-A-s-x`.
+
+Since it is common to contract an MPO with prime levels of 1 and 0 with an MPS with
+prime level of 0 and want a resulting MPS with prime levels of 0, we provide a
+convenience function `apply`:
+```julia
+apply(A, x; kwargs...) = replaceprime(contract(A, x; kwargs...), 2 => 1)`.
+```
+
 Choose the method with the `method` keyword, for example
 `"densitymatrix"` and `"naive"`.
 
@@ -419,7 +533,9 @@ Choose the method with the `method` keyword, for example
 - `maxdim::Int=maxlinkdim(A) * maxlinkdim(ψ))`: the maximal bond dimension of the results MPS.
 - `mindim::Int=1`: the minimal bond dimension of the resulting MPS.
 - `normalize::Bool=false`: whether or not to normalize the resulting MPS.
-- `method::String="densitymatrix"`: the algorithm to use for the contraction.
+- `method::String="densitymatrix"`: the algorithm to use for the contraction. Currently the options are "densitymatrix", where the network formed by the MPO and MPS is squared and contracted down to a density matrix which is diagonalized iteratively at each site, and "naive", where the MPO and MPS tensor are contracted exactly at each site and then a truncation of the resulting MPS is performed.
+
+See also [`apply`](@ref).
 """
 
 @doc """
@@ -549,6 +665,11 @@ function _contract_naive(A::MPO, ψ::MPS; kwargs...)::MPS
 end
 
 function contract(A::MPO, B::MPO; kwargs...)
+  if hassameinds(siteinds, A, B)
+    error(
+      "In `contract(A::MPO, B::MPO)`, MPOs A and B have the same site indices. The indices of the MPOs in the contraction are taken literally, and therefore they should only share on site index per site so the contraction results in an MPO. You may want to use `replaceprime(contract(A', B), 2 => 1)` or `apply(A, B)` which automatically adjusts the prime levels assuming the input MPOs have pairs of primed and unprimed indices.",
+    )
+  end
   cutoff::Float64 = get(kwargs, :cutoff, 1e-14)
   resp_degen::Bool = get(kwargs, :respect_degenerate, true)
   maxdim::Int = get(kwargs, :maxdim, maxlinkdim(A) * maxlinkdim(B))
@@ -598,6 +719,23 @@ function contract(A::MPO, B::MPO; kwargs...)
   return C
 end
 
+"""
+    apply(A::MPO, B::MPO; kwargs...)
+
+Contract the `MPO` `A'` with the `MPO` `B` and then map the prime level of the resulting
+MPO back to having pairs of indices with prime levels of 1 and 0.
+
+Equivalent to `replaceprime(contract(A', B; kwargs...), 2 => 1)`.
+
+See also [`contract`](@ref) for details about the arguments available.
+"""
+function apply(A::MPO, B::MPO; kwargs...)
+  AB = contract(A', B; kwargs...)
+  return replaceprime(AB, 2 => 1)
+end
+
+(A::MPO)(B::MPO; kwargs...) = apply(A, B; kwargs...)
+
 contract_mpo_mpo_doc = """
     contract(A::MPO, B::MPO; kwargs...) -> MPO
     *(::MPO, ::MPO; kwargs...) -> MPO
@@ -605,10 +743,30 @@ contract_mpo_mpo_doc = """
 Contract the `MPO` `A` with the `MPO` `B`, returning an `MPO` with the 
 site indices that are not shared between `A` and `B`.
 
+If you are contracting two MPOs with the same sets of indices, likely you
+want to call something like:
+```julia
+C = contract(A', B; cutoff=1e-12)
+C = replaceprime(C, 2 => 1)
+```
+That is because if MPO `A` has the index structure `-s'-A-s-` and MPO `B`
+has the Index structure `-s'-B-s-`, if we only want to contract over
+on set of the indices, we would do `(-s'-A-s-)'-s'-B-s- = -s''-A-s'-s'-B-s- = -s''-C-s-`,
+and then map the prime levels back to pairs of primed and unprimed indices with:
+`replaceprime(-s''-C-s-, 2 => 1) = -s'-C-s-`.
+
+Since this is a common use case, you can use the convenience function:
+```julia
+C = apply(A, B; cutoff=1e-12)
+```
+which is the same as the code above.
+
 # Keywords
 - `cutoff::Float64=1e-13`: the cutoff value for truncating the density matrix eigenvalues. Note that the default is somewhat arbitrary and subject to change, in general you should set a `cutoff` value.
 - `maxdim::Int=maxlinkdim(A) * maxlinkdim(B))`: the maximal bond dimension of the results MPS.
 - `mindim::Int=1`: the minimal bond dimension of the resulting MPS.
+
+See also [`apply`](@ref) for details about the arguments available.
 """
 
 @doc """
